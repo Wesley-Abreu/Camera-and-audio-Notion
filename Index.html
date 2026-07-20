@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Camera + Mic Recorder</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    video { width: 100%; max-width: 720px; background:#111; border-radius: 12px; }
+    button, select { padding: 10px 12px; font-size: 14px; }
+    .status { margin-top: 10px; color: #333; }
+    .danger { background:#b00020; color:#fff; border:none; border-radius:10px; }
+    .ok { background:#146c43; color:#fff; border:none; border-radius:10px; }
+    .muted { opacity:.75; }
+    .card { border:1px solid #ddd; border-radius: 12px; padding: 12px; max-width: 760px; }
+    a { word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2 style="margin-top:0">Camera + Mic Recorder</h2>
+
+    <div class="row">
+      <button id="btnStartCam" class="ok">Enable camera & mic</button>
+      <button id="btnStartRec" disabled>Start recording</button>
+      <button id="btnStopRec" class="danger" disabled>Stop</button>
+      <span class="muted" id="timer">00:00</span>
+    </div>
+
+    <div class="row" style="margin-top:10px">
+      <label>Camera:
+        <select id="videoSelect"></select>
+      </label>
+      <label>Mic:
+        <select id="audioSelect"></select>
+      </label>
+      <button id="btnApply" disabled>Apply devices</button>
+    </div>
+
+    <div class="status" id="status">Status: idle</div>
+
+    <div style="margin-top:12px">
+      <video id="preview" autoplay playsinline muted></video>
+    </div>
+
+    <div style="margin-top:12px" id="downloadArea"></div>
+
+    <p class="muted" style="margin-bottom:0">
+      Notes: Works only on HTTPS (or localhost). You must allow permissions in the browser prompt.
+    </p>
+  </div>
+
+<script>
+  const btnStartCam = document.getElementById('btnStartCam');
+  const btnStartRec = document.getElementById('btnStartRec');
+  const btnStopRec  = document.getElementById('btnStopRec');
+  const btnApply    = document.getElementById('btnApply');
+
+  const videoSelect = document.getElementById('videoSelect');
+  const audioSelect = document.getElementById('audioSelect');
+
+  const preview = document.getElementById('preview');
+  const statusEl = document.getElementById('status');
+  const timerEl = document.getElementById('timer');
+  const downloadArea = document.getElementById('downloadArea');
+
+  let stream = null;
+  let recorder = null;
+  let chunks = [];
+  let timerInt = null;
+  let startTime = null;
+
+  function setStatus(msg) { statusEl.textContent = "Status: " + msg; }
+
+  function formatTime(ms) {
+    const s = Math.floor(ms/1000);
+    const mm = String(Math.floor(s/60)).padStart(2,'0');
+    const ss = String(s%60).padStart(2,'0');
+    return `${mm}:${ss}`;
+  }
+
+  async function listDevices() {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videos = devices.filter(d => d.kind === 'videoinput');
+    const audios = devices.filter(d => d.kind === 'audioinput');
+
+    videoSelect.innerHTML = videos.map(d =>
+      `<option value="${d.deviceId}">${d.label || "Camera"}</option>`
+    ).join("");
+
+    audioSelect.innerHTML = audios.map(d =>
+      `<option value="${d.deviceId}">${d.label || "Microphone"}</option>`
+    ).join("");
+
+    btnApply.disabled = !(videos.length && audios.length);
+  }
+
+  async function startStream({ videoId, audioId } = {}) {
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+
+    const constraints = {
+      video: videoId ? { deviceId: { exact: videoId } } : true,
+      audio: audioId ? { deviceId: { exact: audioId } } : true
+    };
+
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    preview.srcObject = stream;
+
+    await listDevices();
+    btnStartRec.disabled = false;
+    setStatus("camera/mic enabled");
+  }
+
+  function pickMimeType() {
+    const candidates = [
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm;codecs=opus',
+      'video/webm'
+    ];
+    return candidates.find(t => MediaRecorder.isTypeSupported(t)) || '';
+  }
+
+  function startRecording() {
+    if (!stream) return;
+
+    chunks = [];
+    downloadArea.innerHTML = "";
+
+    const mimeType = pickMimeType();
+    recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) chunks.push(e.data);
+    };
+
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `recording-${new Date().toISOString().replace(/[:.]/g,'-')}.webm`;
+      a.textContent = `Download recording (${Math.round(blob.size/1024/1024*10)/10} MB)`;
+      a.style.display = 'inline-block';
+      a.style.marginTop = '8px';
+
+      downloadArea.appendChild(a);
+      setStatus("recording stopped (download ready)");
+    };
+
+    recorder.start(200); // gather chunks every 200ms
+    btnStartRec.disabled = true;
+    btnStopRec.disabled = false;
+
+    startTime = Date.now();
+    timerEl.textContent = "00:00";
+    timerInt = setInterval(() => {
+      timerEl.textContent = formatTime(Date.now() - startTime);
+    }, 250);
+
+    setStatus("recording…");
+  }
+
+  function stopRecording() {
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+    btnStopRec.disabled = true;
+    btnStartRec.disabled = false;
+
+    if (timerInt) clearInterval(timerInt);
+    timerInt = null;
+  }
+
+  btnStartCam.addEventListener('click', async () => {
+    try {
+      setStatus("requesting permissions…");
+      await startStream();
+    } catch (err) {
+      console.error(err);
+      setStatus("permission denied or no device found");
+    }
+  });
+
+  btnApply.addEventListener('click', async () => {
+    try {
+      await startStream({ videoId: videoSelect.value, audioId: audioSelect.value });
+    } catch (err) {
+      console.error(err);
+      setStatus("could not apply selected devices");
+    }
+  });
+
+  btnStartRec.addEventListener('click', startRecording);
+  btnStopRec.addEventListener('click', stopRecording);
+
+  // Safety: stop tracks when leaving page
+  window.addEventListener('beforeunload', () => {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+  });
+</script>
+</body>
